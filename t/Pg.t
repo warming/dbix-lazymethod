@@ -5,30 +5,31 @@
 use strict;
 use Test::More;
 use DBI;
-
-unless (exists $ENV{'LM_TEST_DB'}) {
-	plan skip_all => "Set 'LM_TEST_DB' environment variable to run this test";
-}
-
-my $DBD = 'Pg'; #DBD to test
-
-my $DB_USER = 'postgres';
-my $DB_PASS = '';
-my $DB_DSN = "DBI:$DBD:dbname=template1";
-
-my @driver_names = DBI->available_drivers;
-
-unless (grep { $_ eq $DBD } @driver_names) {
-	plan skip_all => "Test irrelevant unless $DBD DBD is installed";
-} else {
-	plan tests => 16;
-}
-
 use constant DEBUG => 0;
+	
+my $DB_USER = 'pgsql';
+my $DB_PASS = '';
+my $DB_DSN = "DBI:Pg:dbname=template1";
 
-BEGIN { use_ok( 'DBIx::LazyMethod' ); }
+BEGIN {
+	unless (exists $ENV{'LM_TEST_DB'}) {
+        	plan(skip_all => "Set 'LM_TEST_DB' environment variable to run this test");
+	}
+}
 
-require_ok( 'DBIx::LazyMethod' );
+BEGIN {
+	my @driver_names = DBI->available_drivers;
+
+	unless (grep { $_ eq 'Pg' } @driver_names) {
+		plan(skip_all => "Test irrelevant unless Pg DBD is installed");
+	} else {
+		plan(tests => 17);
+	}
+}
+
+BEGIN { use_ok('DBD::Pg', 1.40) }
+
+BEGIN { use_ok('DBIx::LazyMethod') or exit; }
 
         my %methods = (
                create_people_table => {
@@ -86,8 +87,6 @@ require_ok( 'DBIx::LazyMethod' );
         );
 
         my $db = DBIx::LazyMethod->new(
-#		data_source  => "DBI:Proxy:hostname=192.168.1.1;port=7015;dsn=DBI:Oracle:PERSONS",
-#		data_source => "DBI:$DBD:dbname=template1",
 		data_source => $DB_DSN,
 		user => $DB_USER,
 		pass => $DB_PASS,
@@ -107,7 +106,7 @@ require_ok( 'DBIx::LazyMethod' );
         if ($db->is_error) { warn $db->{errormessage}."\nAborting..\n"; exit 0; }
 
 	print STDERR "Return for create_people_table: $rv0\n" if DEBUG;
-	is($rv0, '-1', 'Test create table: no rows affected');
+	is($rv0, '0E0', 'Test create table: no rows affected');
 
         my $rv1 = $db->create_people_entry(alias=>3,name=>'Johnny Login');
         if ($db->is_error) { warn $db->{errormessage}."\nAborting..\n"; exit 0; }
@@ -182,6 +181,6 @@ require_ok( 'DBIx::LazyMethod' );
         if ($db->is_error) { warn $db->{errormessage}."\nAborting..\n"; exit 0; }
 
 	print STDERR "Return for drop_table: $rv8\n" if DEBUG;
-	is($rv8, -1, 'Test drop table: unknown rows affected');
+	is($rv8, '0E0', 'Test drop table: unknown rows affected');
 
 	undef $db;

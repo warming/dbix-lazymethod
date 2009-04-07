@@ -3,14 +3,16 @@
 # $Id: LazyMethod.t,v 1.2 2004/03/27 13:40:17 cwg Exp $
 
 use strict;
-use Test::More tests => 5;
-
+use Test::More tests => 3;
 use constant DEBUG => 0;
 
-BEGIN { use_ok( 'DBIx::LazyMethod' ); }
+BEGIN { use_ok( 'DBIx::LazyMethod' ) or exit; }
 
-require_ok( 'DBIx::LazyMethod' );
-require_ok( 'DBI' );
+#BEGIN {
+#  use Exporter;
+#  @DBIx::LazyMethod::ISA = ( 'Exporter' );
+#  @DBIx::LazyMethod::EXPORT = qw/WANT_ARRAY WANT_ARRAYREF WANT_HASHREF WANT_ARRAY_HASHREF WANT_RETURN_VALUE WANT_AUTO_INCREMENT/;
+#}
 
         my %methods = (
                create_people_table => {
@@ -61,7 +63,6 @@ require_ok( 'DBI' );
         );
 
         my $db = DBIx::LazyMethod->new(
-#		data_source  => "DBI:Proxy:hostname=192.168.1.1;port=7015;dsn=DBI:Oracle:PERSONS",
 		data_source => "DBI:ExampleP:",
 		user => 'csv',
 		pass => 'csv',
@@ -69,7 +70,7 @@ require_ok( 'DBI' );
 		methods => \%methods,
 		);
 
-	is(ref $db, 'DBIx::LazyMethod', 'Test the constructed object');
+	isa_ok($db,'DBIx::LazyMethod');
 
         if ($db->is_error) { die $db->{errormessage}; }
 	is($db->is_error, 0, 'Test new good instance');

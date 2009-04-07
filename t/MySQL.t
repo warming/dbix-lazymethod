@@ -5,32 +5,29 @@
 use strict;
 use Test::More;
 use DBI;
-
-unless (exists $ENV{'LM_TEST_DB'}) {
-        plan skip_all => "Set 'LM_TEST_DB' environment variable to run this test";
-}
-
-my $DBD = 'mysql'; #DBD to test
-                       
+use constant DEBUG => 0;
+	
 my $DB_USER = 'mysql';
 my $DB_PASS = '';
-my $DB_DSN = "DBI:$DBD:test:localhost";
+my $DB_DSN = "DBI:mysql:test:localhost";
 
-
-
-my @driver_names = DBI->available_drivers;
-
-unless (grep { $_ eq $DBD } @driver_names) {
-	plan skip_all => "Test irrelevant unless $DBD DBD is installed";
-} else {
-	plan tests => 15;
+BEGIN {
+	unless (exists $ENV{'LM_TEST_DB'}) {
+        	plan(skip_all => "Set 'LM_TEST_DB' environment variable to run this test");
+	}
 }
 
-use constant DEBUG => 0;
+BEGIN {
+	my @driver_names = DBI->available_drivers;
 
-BEGIN { use_ok( 'DBIx::LazyMethod' ); }
+	unless (grep { $_ eq 'mysql' } @driver_names) {
+		plan(skip_all => "Test irrelevant unless mysql DBD is installed");
+	} else {
+		plan(tests => 15);
+	}
+}
 
-require_ok( 'DBIx::LazyMethod' );
+BEGIN { use_ok( 'DBIx::LazyMethod' ) or exit; } 
 
         my %methods = (
                create_people_table => {

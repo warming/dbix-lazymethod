@@ -3,24 +3,31 @@
 # $Id: CSV.t,v 1.2 2004/03/27 13:40:17 cwg Exp $
 
 use strict;
-#use lib qw(lib ../lib);
 use Test::More;
 use DBI;
+use constant DEBUG => 0;
+	
+my $DB_USER = 'csv';
+my $DB_PASS = 'csv';
+my $DB_DSN = "DBI:CSV:";
 
-my $DBD = 'CSV'; #DBD to test
-my @driver_names = DBI->available_drivers;
-
-unless (grep { $_ eq $DBD } @driver_names) {
-	plan skip_all => "Test irrelevant unless $DBD DBD is installed";
-} else {
-	plan tests => 15;
+BEGIN {
+	unless (exists $ENV{'LM_TEST_DB'}) {
+        	plan(skip_all => "Set 'LM_TEST_DB' environment variable to run this test");
+	}
 }
 
-use constant DEBUG => 0;
+BEGIN {
+	my @driver_names = DBI->available_drivers;
 
-BEGIN { use_ok( 'DBIx::LazyMethod' ); }
+	unless (grep { $_ eq 'CSV' } @driver_names) {
+		plan(skip_all => "Test irrelevant unless CSV DBD is installed");
+	} else {
+		plan(tests => 15);
+	}
+}
 
-require_ok( 'DBIx::LazyMethod' );
+BEGIN { use_ok( 'DBIx::LazyMethod' ) or exit; }
 
         my %methods = (
                create_people_table => {
@@ -71,15 +78,14 @@ require_ok( 'DBIx::LazyMethod' );
         );
 
         my $db = DBIx::LazyMethod->new(
-#		data_source  => "DBI:Proxy:hostname=192.168.1.1;port=7015;dsn=DBI:Oracle:PERSONS",
-		data_source => "DBI:$DBD:",
-		user => 'csv',
-		pass => 'csv',
+		data_source => $DB_DSN,
+		user => $DB_USER,
+		pass => $DB_PASS,
 		attr => { 'RaiseError' => 0, 'AutoCommit' => 1 },
 		methods => \%methods,
 		);
 
-	is(ref $db, 'DBIx::LazyMethod', 'Test the constructed object');
+	isa_ok($db, 'DBIx::LazyMethod');
 
         if ($db->is_error) { die $db->{errormessage}; }
 	is($db->is_error, 0, 'Test new good instance');
