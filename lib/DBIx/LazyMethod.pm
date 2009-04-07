@@ -57,47 +57,50 @@ sub new {
 		if (grep { $meth eq $_ } PRIVATE_METHODS) {
 			die "$PACKAGE method name $meth is a reserved method name";
 		}
-		#A way to validate SQL could be nice.
-		unless (defined ${%$methods_ref}{$meth}->{sql}) {
-			die "$PACKAGE method $meth: missing SQL";
+		unless (exists $methods_ref->{$meth}->{sql} && defined $methods_ref->{$meth}->{sql}) {
+			die "$PACKAGE method $meth: missing sql definition";
 		}
-		unless (defined ${%$methods_ref}{$meth}->{args}) {
+		unless (exists $methods_ref->{$meth}->{args} && defined $methods_ref->{$meth}->{args}) {
 			die "$PACKAGE method $meth: missing argument definition";
 		}
-		unless (defined ${%$methods_ref}{$meth}->{ret}) {
+		unless (exists $methods_ref->{$meth}->{ret} && defined $methods_ref->{$meth}->{ret}) {
 			die "$PACKAGE method $meth: missing return data definition";
 		}
-		unless (ref ${%$methods_ref}{$meth}->{args} eq 'ARRAY') {
+
+		#A way to validate SQL could be nice.
+		unless ($methods_ref->{$meth}->{sql}) {
+			die "$PACKAGE method $meth: sql definition is empty";
+		}
+		unless (ref $methods_ref->{$meth}->{args} eq 'ARRAY') {
 			die "$PACKAGE method $meth: bad argument list";
 		}
+		unless (grep { $methods_ref->{$meth}->{ret} eq $_ } WANT_METHODS ) {
+			die "$PACKAGE bad return value definition in method $meth";
+		}
 
-		#check if we got the right amout of args - Cleanup on isle 9!
-		my $arg_count = @{${%$methods_ref}{$meth}->{args}};
+		#check if we got the right amout of args - Cleanup on aisle 9!
+		my $arg_count = @{$methods_ref->{$meth}->{args}};
 		#we should probably rather get amount of placeholders from DBI at some point. But then we can't do it before a prepare.
-		my @placeholders = ${%$methods_ref}{$meth}->{sql} =~ m/\?/g;
+		my @placeholders = $methods_ref->{$meth}->{sql} =~ m/\?/g;
 
 		unless ($arg_count == scalar @placeholders) {
 			warn "$PACKAGE method $meth: argument list does not match number of placeholders in SQL. You should get an error from DBI.";
 		}
 
 		#check DBD specific issues
-		if (${%$methods_ref}{$meth}->{ret} eq WANT_AUTO_INCREMENT) {
+		if ($methods_ref->{$meth}->{ret} == WANT_AUTO_INCREMENT) {
 			unless (grep { lc $dbd_name eq $_ } qw(mysql pg)) {
 				die "$PACKAGE return value type WANT_AUTO_INCREMENT not supported by $dbd_name DBD in method $meth";
 			}
 		}
 
-		unless (grep { ${%$methods_ref}{$meth}->{ret} eq $_ } WANT_METHODS ) {
-			die "$PACKAGE bad return value definition in method $meth";
-		}
-
 		# Since 'noprepare' causes us to do a $dbh->do, we cannot return anything else than WANT_RETURN_VALUE	
-		if ((${%$methods_ref}{$meth}->{ret} != WANT_RETURN_VALUE) && (defined ${%$methods_ref}{$meth}->{'noprepare'})) {
+		if ($methods_ref->{$meth}->{ret} != WANT_RETURN_VALUE && exists $methods_ref->{$meth}->{'noprepare'}) {
 			die "$PACKAGE return value for $meth must be WANT_RETURN_VALUE if 'noprepare' option is used";
 		}
 
 		# Use of 'noquote' option is depending on 'noprepare' option. Check that it is set.
-		if (defined (${%$methods_ref}{$meth}->{'noquote'}) && (!defined ${%$methods_ref}{$meth}->{'noprepare'})) {
+		if (exists $methods_ref->{$meth}->{'noquote'} && !exists $methods_ref->{$meth}->{'noprepare'}) {
 			warn "$PACKAGE useless use of 'noquote' option without required 'noprepare' option for method $meth";
 		}
 
@@ -126,13 +129,14 @@ sub AUTOLOAD {
 	my ($meth) = $AUTOLOAD =~ /.*::([\w_]+)/;
 
 	#clear the error register
-	$self->_error(FALSE);
+	delete $self->{'errorstate'};
+	$self->{'errormessage'} = "[unknown]";
 
 	#is it a DBI statement handle
         if ($AUTOLOAD =~ /.*::_sth_([\w_]+)/) {
 
                 #unless it is already created 
-                return if defined $self->{'_sth_'.$1};
+                return if exists $self->{'_sth_'.$1};
 
 		#we need a DBI handle
                 #exists $self->{_dbh} or return $self->_error("DBI handle missing");
@@ -146,7 +150,7 @@ sub AUTOLOAD {
                 #	die "You cannot use exists $self->{'methods'}{$1} or $self->_error("Method ".$1." not defined");
 
 		#we create a new DBI statement handle - unless it's a no-prepare type
-		if  (defined $self->{'methods'}{$1}->{'noprepare'}) {
+		if  (exists $self->{'methods'}{$1}->{'noprepare'}) {
 			$self->{'_sth_'.$1} = TRUE; #faking it
 		} else {
 			print STDERR "$PACKAGE DEBUG: preparing ".$self->{'methods'}{$1}->{sql}."\n" if DEBUG;
@@ -158,7 +162,7 @@ sub AUTOLOAD {
                 return;
 	}
 	#is it a method
-	elsif (defined $self->{'methods'}{$meth}) {
+	elsif (exists $self->{'methods'}{$meth}) {
 		
 		#call the associated DBI statement handle (which is then automagically created)
 		my $sthname = "_sth_".$meth;
@@ -173,7 +177,7 @@ sub AUTOLOAD {
 		my $cnt = 1;
 		#run through the args defined for the method
 		foreach (@$argsref) {
-			unless (defined $args{$_}) { 
+			unless (exists $args{$_}) { 
 				return $self->_error($meth." Insufficient parameters (".$_.")");
 			}
 			#the argument was provided, so we use it
@@ -186,7 +190,7 @@ sub AUTOLOAD {
 			next unless ($self->{_dbh}->{Driver}->{Name} eq 'mysql');
 
 			# If we haven't prepared the $sth, then don't call it
-			next unless (defined $self->{'methods'}{$meth}->{'noprepare'});
+			next unless (exists $self->{'methods'}{$meth}->{'noprepare'});
 
 			if ($_ =~ /^limit_/) { $self->{"_sth_".$meth}->bind_param($cnt,'',DBI::SQL_INTEGER); }
 			$cnt++;
@@ -199,10 +203,10 @@ sub AUTOLOAD {
 
 		#do it
 		my $rv;	
-		if  (defined $self->{'methods'}{$meth}->{'noprepare'}) {
+		if  (exists $self->{'methods'}{$meth}->{'noprepare'}) {
 			# Execute the SQL directly - as we have no prepared $sth
 			my $sql = $self->{'methods'}{$meth}->{sql};
-			if (defined $self->{'methods'}{$meth}->{'noquote'}) {
+			if (exists $self->{'methods'}{$meth}->{'noquote'}) {
 				# HACK: danger will robinson. danger.
 				my $sql = $self->{'methods'}{$meth}->{sql};
 				$sql =~ s/\?+?/(shift @bind_values)/oe while (@bind_values);
@@ -217,7 +221,7 @@ sub AUTOLOAD {
 			$rv = $sth->execute(@bind_values) or return $self->_error("_sth_".$meth." execute failed : ".DBI::errstr);
 		}
 		print STDERR "$PACKAGE DEBUG: $meth DBI: ".DBI::errstr."\n" if (!$rv && DEBUG);
-		unless ($rv) { return $self->_error("DBI execute error: ".DBI::errstr); }
+		unless ($rv) { $self->_error("DBI execute error: ".DBI::errstr); $sth->finish; return }
 
 		my ($ret) = $self->{'methods'}{$meth}->{ret};
 		print STDERR "Found ret for $meth: $ret\n" if DEBUG;
@@ -255,7 +259,7 @@ sub AUTOLOAD {
 
 			if (lc $cur_dbd eq 'mysql') {
 				#MySQL index/auto_increment hack
-				if (defined $sth->{'mysql_insertid'}) { 
+				if (exists $sth->{'mysql_insertid'}) { 
 					return $sth->{'mysql_insertid'};
 				} else {
 					return $self->_error("_sth_".$meth." could not get mysql_insertid from mysql DBD");
@@ -263,7 +267,7 @@ sub AUTOLOAD {
 			}
 			elsif (lc $cur_dbd eq 'pg') {
 				#PostgreSQL index/auto_increment hack
-				if (defined $sth->{'pg_oid_status'}) { 
+				if (exists $sth->{'pg_oid_status'}) { 
 					return $sth->{'pg_oid_status'};
 				} else {
 					return $self->_error("_sth_".$meth." could not get pg_oid_status from Pg DBD");
@@ -285,13 +289,13 @@ sub AUTOLOAD {
 sub DESTROY ($) {
 	my $self = shift;
 	#do we have any methods?
-	if (defined $self->{'methods'}) {
+	if (exists $self->{'methods'}) {
 		#remember to bury statement handles
 		foreach (keys %{$self->{'methods'}}) {
 			#ignore if we haven't used a sth
-			next if (defined $self->{'methods'}{$_}->{'noprepare'});
+			next if (exists $self->{'methods'}{$_}->{'noprepare'});
 			#if the sth of a methods is defined it has been used
-        	        if (defined $self->{'_sth_'.$_}) {
+        	        if (exists $self->{'_sth_'.$_}) {
 				#finish the sth
                 	        $self->{'_sth_'.$_}->finish;
                		        print STDERR "$PACKAGE DEBUG: meth DESTROY - finished _sth_".$_." handle\n" if DEBUG;
@@ -299,7 +303,7 @@ sub DESTROY ($) {
 		}
 	}
 	#and hang up if we have a connection
-        if (defined $self->{'_dbh'}) { $self->_disconnect(); }
+        if (exists $self->{'_dbh'}) { $self->_disconnect(); }
 }
 
 sub _connect {
@@ -338,20 +342,15 @@ sub _disconnect {
 
 sub _error {
         my ($self,$data) = (shift,shift);
-	if ($data eq FALSE) {
-        	delete $self->{'errorstate'};
-       		$self->{'errormessage'} = "[unknown]";
-	} else {
-        	$self->{'errorstate'} = TRUE;
-        	$self->{'errormessage'} = $data;
-        	warn "$PACKAGE ERROR: ".$data;
-	}
+        $self->{'errorstate'} = TRUE;
+        $self->{'errormessage'} = $data;
+        warn "$PACKAGE ERROR: ".$data;
         return;
 }
 
 sub is_error ($) {
 	my $self = shift;
-	return (defined $self->{'errorstate'})?TRUE:FALSE;
+	return (exists $self->{'errorstate'})?TRUE:FALSE;
 }
 
 1;
