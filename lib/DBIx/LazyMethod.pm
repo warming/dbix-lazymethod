@@ -8,9 +8,9 @@ use strict;
 use Carp;
 use DBI;
 use Exporter;
-use vars qw($VERSION $AUTOLOAD @EXPORT @ISA);
+use vars qw($VERSION $AUTOLOAD @EXPORT @ISA %RETSIGN2CODE);
 
-use constant RETURN_VALUES => qw(WANT_ARRAY WANT_ARRAYREF WANT_HASHREF WANT_ARRAY_HASHREF WANT_RETURN_VALUE WANT_AUTO_INCREMENT); #The return value names
+use constant RETURN_VALUES => qw(WANT_ARRAY WANT_ARRAYREF WANT_HASHREF WANT_ARRAY_HASHREF WANT_RETURN_VALUE WANT_ARRAY_ARRAYREF WANT_RETVAL WANT_AUTO_INCREMENT WANT_HANDLE); #The return value names
 @EXPORT 	= RETURN_VALUES; 
 @ISA    	= qw(Exporter);
 $VERSION 	= do { my @r=(q$Revision: 1.3 $=~/\d+/g); sprintf "%d."."%02d"x$#r,@r };
@@ -21,9 +21,12 @@ use constant WANT_ARRAY 		=> 1;
 use constant WANT_ARRAYREF 		=> 2;
 use constant WANT_HASHREF 		=> 3;
 use constant WANT_ARRAY_HASHREF 	=> 4;
-use constant WANT_RETURN_VALUE 		=> 5;
+use constant WANT_RETURN_VALUE 		=> 5; 
+use constant WANT_RETVAL         	=> 5; #deprecated in favor of WANT_RETURN_VALUE, maintained for compat
 use constant WANT_AUTO_INCREMENT 	=> 6;
-use constant WANT_METHODS 		=> (WANT_ARRAY,WANT_ARRAYREF,WANT_HASHREF,WANT_ARRAY_HASHREF,WANT_RETURN_VALUE,WANT_AUTO_INCREMENT); #The return values
+use constant WANT_HANDLE         	=> 7;
+use constant WANT_ARRAY_ARRAYREF 	=> 8;
+use constant WANT_METHODS 		=> (WANT_ARRAY,WANT_ARRAYREF,WANT_ARRAY_ARRAYREF,WANT_HASHREF,WANT_ARRAY_HASHREF,WANT_RETURN_VALUE,WANT_AUTO_INCREMENT,WANT_HANDLE); #The return values
 
 #Private constants
 use constant TRUE 			=> 1;
@@ -32,6 +35,20 @@ use constant PRIVATE_METHODS 		=> qw(new AUTOLOAD DESTROY _connect _disconnect _
 
 #debug constant
 use constant DEBUG 			=> 0;
+
+#JENDAs improved retval syntax
+%RETSIGN2CODE = (
+	'@'	=> WANT_ARRAY,
+	'\@'	=> WANT_ARRAYREF,
+	'\%'	=> WANT_HASHREF,
+	'%'	=> WANT_HASHREF,
+	'@%'	=> WANT_ARRAY_HASHREF,
+	'@@'	=> WANT_ARRAY_ARRAYREF,
+	'$'	=> WANT_RETURN_VALUE,
+	'$++'	=> WANT_AUTO_INCREMENT,
+	'<>'	=> WANT_HANDLE
+);
+
 
 #methods
 sub new {
@@ -52,56 +69,61 @@ sub new {
 	my ($dbd_name) = $args{'data_source'} =~ /^dbi:(.*?):/i; 
 	#this approach will have to change when we start to accept an already create DBI handle
 	my $good_methods = 0;
-	foreach my $meth (keys %$methods_ref) {
+	foreach my $methname (keys %$methods_ref) {
 		#check for internal names / reserwed words in method names
-		if (grep { $meth eq $_ } PRIVATE_METHODS) {
-			die "$PACKAGE method name $meth is a reserved method name";
+		if (grep { $methname eq $_ } PRIVATE_METHODS) {
+			die "$PACKAGE method name $methname is a reserved method name";
 		}
-		unless (exists $methods_ref->{$meth}->{sql} && defined $methods_ref->{$meth}->{sql}) {
-			die "$PACKAGE method $meth: missing sql definition";
+		unless (exists $methods_ref->{$methname}->{sql} && defined $methods_ref->{$methname}->{sql}) {
+			die "$PACKAGE method $methname: missing sql definition";
 		}
-		unless (exists $methods_ref->{$meth}->{args} && defined $methods_ref->{$meth}->{args}) {
-			die "$PACKAGE method $meth: missing argument definition";
+		unless (exists $methods_ref->{$methname}->{args} && defined $methods_ref->{$methname}->{args}) {
+			die "$PACKAGE method $methname: missing argument definition";
 		}
-		unless (exists $methods_ref->{$meth}->{ret} && defined $methods_ref->{$meth}->{ret}) {
-			die "$PACKAGE method $meth: missing return data definition";
+		unless (exists $methods_ref->{$methname}->{ret} && defined $methods_ref->{$methname}->{ret}) {
+			die "$PACKAGE method $methname: missing return data definition";
 		}
 
-		#A way to validate SQL could be nice.
-		unless ($methods_ref->{$meth}->{sql}) {
-			die "$PACKAGE method $meth: sql definition is empty";
+		#translate JENDAs symbols to the WANT_METHODS
+		if ( $methods_ref->{$methname}->{ret} !~ /^\d+$/ ) {    # the ret specification is a sign, not an id
+			$methods_ref->{$methname}->{ret} = $RETSIGN2CODE{ $methods_ref->{$methname}->{ret} };
 		}
-		unless (ref $methods_ref->{$meth}->{args} eq 'ARRAY') {
-			die "$PACKAGE method $meth: bad argument list";
+
+		#a way to validate SQL could be nice.
+		unless ($methods_ref->{$methname}->{sql}) {
+			die "$PACKAGE method $methname: sql definition is empty";
 		}
-		unless (grep { $methods_ref->{$meth}->{ret} eq $_ } WANT_METHODS ) {
-			die "$PACKAGE bad return value definition in method $meth";
+		unless (ref $methods_ref->{$methname}->{args} eq 'ARRAY') {
+			die "$PACKAGE method $methname: bad argument list";
+		}
+		unless (grep { $methods_ref->{$methname}->{ret} eq $_ } WANT_METHODS ) {
+			die "$PACKAGE bad return value definition in method $methname";
 		}
 
 		#check if we got the right amout of args - Cleanup on aisle 9!
-		my $arg_count = @{$methods_ref->{$meth}->{args}};
+		my $arg_count = @{$methods_ref->{$methname}->{args}};
 		#we should probably rather get amount of placeholders from DBI at some point. But then we can't do it before a prepare.
-		my @placeholders = $methods_ref->{$meth}->{sql} =~ m/\?/g;
+		my @placeholders = $methods_ref->{$methname}->{sql} =~ m/\?/g;
 
 		unless ($arg_count == scalar @placeholders) {
-			warn "$PACKAGE method $meth: argument list does not match number of placeholders in SQL. You should get an error from DBI.";
+			warn "$PACKAGE method $methname: argument list does not match number of placeholders in SQL. You should get an error from DBI.";
 		}
 
 		#check DBD specific issues
-		if ($methods_ref->{$meth}->{ret} == WANT_AUTO_INCREMENT) {
+		if ($methods_ref->{$methname}->{ret} == WANT_AUTO_INCREMENT) {
 			unless (grep { lc $dbd_name eq $_ } qw(mysql pg)) {
-				die "$PACKAGE return value type WANT_AUTO_INCREMENT not supported by $dbd_name DBD in method $meth";
+				die "$PACKAGE return value type WANT_AUTO_INCREMENT not supported by $dbd_name DBD in method $methname";
 			}
 		}
 
 		# Since 'noprepare' causes us to do a $dbh->do, we cannot return anything else than WANT_RETURN_VALUE	
-		if ($methods_ref->{$meth}->{ret} != WANT_RETURN_VALUE && exists $methods_ref->{$meth}->{'noprepare'}) {
-			die "$PACKAGE return value for $meth must be WANT_RETURN_VALUE if 'noprepare' option is used";
+		if ($methods_ref->{$methname}->{ret} != WANT_RETURN_VALUE && exists $methods_ref->{$methname}->{'noprepare'}) {
+			die "$PACKAGE return value for $methname must be WANT_RETURN_VALUE if 'noprepare' option is used";
 		}
 
 		# Use of 'noquote' option is depending on 'noprepare' option. Check that it is set.
-		if (exists $methods_ref->{$meth}->{'noquote'} && !exists $methods_ref->{$meth}->{'noprepare'}) {
-			warn "$PACKAGE useless use of 'noquote' option without required 'noprepare' option for method $meth";
+		if (exists $methods_ref->{$methname}->{'noquote'} && !exists $methods_ref->{$methname}->{'noprepare'}) {
+			warn "$PACKAGE useless use of 'noquote' option without required 'noprepare' option for method $methname";
 		}
 
 		$good_methods++;
@@ -126,7 +148,7 @@ sub new {
 sub AUTOLOAD {
 	my $self = shift;
 	my %args = @_;
-	my ($meth) = $AUTOLOAD =~ /.*::([\w_]+)/;
+	my ($methname) = $AUTOLOAD =~ /.*::([\w_]+)/;
 
 	#clear the error register
 	delete $self->{'errorstate'};
@@ -134,7 +156,6 @@ sub AUTOLOAD {
 
 	#is it a DBI statement handle
         if ($AUTOLOAD =~ /.*::_sth_([\w_]+)/) {
-
                 #unless it is already created 
                 return if exists $self->{'_sth_'.$1};
 
@@ -154,7 +175,7 @@ sub AUTOLOAD {
 			$self->{'_sth_'.$1} = TRUE; #faking it
 		} else {
 			print STDERR "$PACKAGE DEBUG: preparing ".$self->{'methods'}{$1}->{sql}."\n" if DEBUG;
-                	$self->{'_sth_'.$1} =  $self->{_dbh}->prepare($self->{'methods'}{$1}->{sql}) or return $self->_error($meth." prepare failed");
+                	$self->{'_sth_'.$1} =  $self->{_dbh}->prepare($self->{'methods'}{$1}->{sql}) or return $self->_error($methname." prepare failed");
 		}
 
 		# Use this DBI built-in some day
@@ -162,23 +183,23 @@ sub AUTOLOAD {
                 return;
 	}
 	#is it a method
-	elsif (exists $self->{'methods'}{$meth}) {
+	elsif (exists $self->{'methods'}{$methname}) {
 		
 		#call the associated DBI statement handle (which is then automagically created)
-		my $sthname = "_sth_".$meth;
+		my $sthname = "_sth_".$methname;
 		$self->$sthname();
 	
 		#and it the statement handle will appear on the self object
-		my $sth = $self->{"_sth_".$meth};
+		my $sth = $self->{"_sth_".$methname};
 
-		my ($argsref) = $self->{'methods'}{$meth}->{args};
+		my ($argsref) = $self->{'methods'}{$methname}->{args};
 		#put the required bind values here
 		my @bind_values = ();
 		my $cnt = 1;
 		#run through the args defined for the method
 		foreach (@$argsref) {
 			unless (exists $args{$_}) { 
-				return $self->_error($meth." Insufficient parameters (".$_.")");
+				return $self->_error($methname." Insufficient parameters (".$_.")");
 			}
 			#the argument was provided, so we use it
 			push @bind_values, $args{$_};
@@ -190,67 +211,67 @@ sub AUTOLOAD {
 			next unless ($self->{_dbh}->{Driver}->{Name} eq 'mysql');
 
 			# If we haven't prepared the $sth, then don't call it
-			next unless (exists $self->{'methods'}{$meth}->{'noprepare'});
+			next unless (exists $self->{'methods'}{$methname}->{'noprepare'});
 
-			if ($_ =~ /^limit_/) { $self->{"_sth_".$meth}->bind_param($cnt,'',DBI::SQL_INTEGER); }
+			if ($_ =~ /^limit_/) { $sth->bind_param($cnt,'',DBI::SQL_INTEGER); }
 			$cnt++;
 		}
 
 		#warn if more arguments than needed was provided
 		foreach (keys %args) {
-			warn "$PACKAGE WARN: useless argument \"".$_."\" provided for method \"".$meth."\"";
+			warn "$PACKAGE WARN: useless argument \"".$_."\" provided for method \"".$methname."\"";
 		}
 
 		#do it
 		my $rv;	
-		if  (exists $self->{'methods'}{$meth}->{'noprepare'}) {
+		if  (exists $self->{'methods'}{$methname}->{'noprepare'}) {
 			# Execute the SQL directly - as we have no prepared $sth
-			my $sql = $self->{'methods'}{$meth}->{sql};
-			if (exists $self->{'methods'}{$meth}->{'noquote'}) {
+			my $sql = $self->{'methods'}{$methname}->{sql};
+			if (exists $self->{'methods'}{$methname}->{'noquote'}) {
 				# HACK: danger will robinson. danger.
-				my $sql = $self->{'methods'}{$meth}->{sql};
+				my $sql = $self->{'methods'}{$methname}->{sql};
 				$sql =~ s/\?+?/(shift @bind_values)/oe while (@bind_values);
-				$rv = $self->{_dbh}->do($sql) or return $self->_error("_sth_".$meth." do failed : ".DBI::errstr);
+				$rv = $self->{_dbh}->do($sql) or return $self->_error("_sth_".$methname." do failed : ".DBI::errstr);
 			} else {
 				# Let's quote the bind_values
 				#$sql =~ s/\?+?/($self->{_dbh}->quote_identifier(shift @bind_values))/oe while (@bind_values);
-				$rv = $self->{_dbh}->do($self->{'methods'}{$meth}->{sql},undef,@bind_values) or return $self->_error("_sth_".$meth." do failed : ".DBI::errstr);
+				$rv = $self->{_dbh}->do($self->{'methods'}{$methname}->{sql},undef,@bind_values) or return $self->_error("_sth_".$methname." do failed : ".DBI::errstr);
 			}
 		} else {
 			# Execute the query normally on the statement handle
-			$rv = $sth->execute(@bind_values) or return $self->_error("_sth_".$meth." execute failed : ".DBI::errstr);
+			$rv = $sth->execute(@bind_values);
 		}
-		print STDERR "$PACKAGE DEBUG: $meth DBI: ".DBI::errstr."\n" if (!$rv && DEBUG);
+		print STDERR "$PACKAGE DEBUG:  DBI: ".DBI::errstr."\n" if (!$rv && DEBUG);
 		unless ($rv) { $self->_error("DBI execute error: ".DBI::errstr); $sth->finish; return }
 
-		my ($ret) = $self->{'methods'}{$meth}->{ret};
-		print STDERR "Found ret for $meth: $ret\n" if DEBUG;
+		my ($ret) = $self->{'methods'}{$methname}->{ret};
+		print STDERR "Found ret for $methname: $ret\n" if DEBUG;
 
-		if ($self->{'methods'}{$meth}->{ret} == WANT_ARRAY) {
+		if ($self->{'methods'}{$methname}->{ret} == WANT_ARRAY) {
 			my @ret;
 			while (my (@ref) = $sth->fetchrow_array) { push @ret,@ref }
 			return @ret;
-		} elsif ($self->{'methods'}{$meth}->{ret} == WANT_ARRAYREF) {
+		} elsif ($self->{'methods'}{$methname}->{ret} == WANT_ARRAYREF) {
 			my $ret = $sth->fetchrow_arrayref;
 			if ((!defined $ret) || (ref $ret eq 'ARRAY')) {
 				return $ret;
 			} else {
-				return $self->_error("_sth_".$meth." is doing fetching on a non-SELECT statement");
+				return $self->_error("_sth_".$methname." is doing fetching on a non-SELECT statement");
 			}
-		} elsif ($self->{'methods'}{$meth}->{ret} == WANT_HASHREF) {
+		} elsif ($self->{'methods'}{$methname}->{ret} == WANT_HASHREF) {
 			my $ret = $sth->fetchrow_hashref;
 			if ((!defined $ret) || (ref $ret eq 'HASH')) {
 				return $ret;
 			} else {
-				return $self->_error("_sth_".$meth." is doing fetching on a non-SELECT statement");
+				return $self->_error("_sth_".$methname." is doing fetching on a non-SELECT statement");
 			}
-		} elsif ($self->{'methods'}{$meth}->{ret} == WANT_ARRAY_HASHREF) {
+		} elsif ($self->{'methods'}{$methname}->{ret} == WANT_ARRAY_HASHREF) {
 			my @ret;
 			while (my $ref = $sth->fetchrow_hashref) {
 				push @ret, $ref;
 			}
 			return \@ret;
-		} elsif ($self->{'methods'}{$meth}->{ret} == WANT_AUTO_INCREMENT) {
+		} elsif ($self->{'methods'}{$methname}->{ret} == WANT_AUTO_INCREMENT) {
 
 			my $cur_dbd = $self->{_dbh}->{Driver}->{Name};
 			unless ($cur_dbd) { return $self->_error("Unknown DBD '".$cur_dbd."'"); }
@@ -262,7 +283,7 @@ sub AUTOLOAD {
 				if (exists $sth->{'mysql_insertid'}) { 
 					return $sth->{'mysql_insertid'};
 				} else {
-					return $self->_error("_sth_".$meth." could not get mysql_insertid from mysql DBD");
+					return $self->_error("_sth_".$methname." could not get mysql_insertid from mysql DBD");
 				}
 			}
 			elsif (lc $cur_dbd eq 'pg') {
@@ -270,15 +291,15 @@ sub AUTOLOAD {
 				if (exists $sth->{'pg_oid_status'}) { 
 					return $sth->{'pg_oid_status'};
 				} else {
-					return $self->_error("_sth_".$meth." could not get pg_oid_status from Pg DBD");
+					return $self->_error("_sth_".$methname." could not get pg_oid_status from Pg DBD");
 				}
 			} else {
-				return $self->_error("_sth_".$meth." is using DBD specific AUTO_INCREMENT on unsupported DBD");
+				return $self->_error("_sth_".$methname." is using DBD specific AUTO_INCREMENT on unsupported DBD");
 			}
-		} elsif ($self->{'methods'}{$meth}->{ret} == WANT_RETURN_VALUE) {
+		} elsif ($self->{'methods'}{$methname}->{ret} == WANT_RETURN_VALUE) {
 			return $rv;
 		} else {
-			return $self->_error("No such return type for ".$meth);
+			return $self->_error("No such return type for ".$methname);
 		}
 
         } else {
@@ -298,7 +319,7 @@ sub DESTROY ($) {
         	        if (exists $self->{'_sth_'.$_}) {
 				#finish the sth
                 	        $self->{'_sth_'.$_}->finish;
-               		        print STDERR "$PACKAGE DEBUG: meth DESTROY - finished _sth_".$_." handle\n" if DEBUG;
+               		        print STDERR "$PACKAGE DEBUG: method DESTROY - finished _sth_".$_." handle\n" if DEBUG;
                	 	}
 		}
 	}
