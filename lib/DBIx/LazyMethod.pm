@@ -135,10 +135,28 @@ sub new {
 	#TODO: more input checking?
 	#At some point an existing $dbh object could be passed as an argument to new() instead of this.
 	$self->{'methods'} 		= $methods_ref;		
-	$self->{'_data_source'} 	= $args{'data_source'} 	|| die "Argument data_source missing";
+	$self->{'_data_source'} 	= $args{'data_source'} 		|| die "Argument data_source missing";
 	$self->{'_user'} 		= $args{'user'} 		|| "";
 	$self->{'_pass'}  		= $args{'pass'} 		|| undef; 
 	$self->{'_attr'} 		= $args{'attr'} 		|| undef;
+
+	#How to deal with errors
+	$self->{'_on_errors'}		= $args{'on_errors'}	  	|| 'carp';
+	if (exists $args{'format_errors'} and ref( $args{'format_errors'} ) eq 'CODE') {
+		$self->{'_format_errors'} = $args{'format_errors'}
+	}
+
+	#if default values have been provided	
+	if (exists $args{'defaults'}) {
+		$self->{'defaults'} 	= $args{'defaults'};
+	}
+	#JENDA naming
+	if (exists $args{'session'}) {
+		$self->{'defaults'} 	= $args{'session'};
+	}
+
+	$self->{'warn_useless'} = ( exists $args{'warn_useless'} ? $args{'warn_useless'} : 1 );
+
 	#connect us
 	$self->{'_dbh'} 		= $self->_connect;
 	
@@ -154,55 +172,50 @@ sub AUTOLOAD {
 	delete $self->{'errorstate'};
 	$self->{'errormessage'} = "[unknown]";
 
-	#is it a DBI statement handle
-        if ($AUTOLOAD =~ /.*::_sth_([\w_]+)/) {
-                #unless it is already created 
-                return if exists $self->{'_sth_'.$1};
+	#is it a method
+	if (exists $self->{'methods'}{$methname}) {
+		my $meth = $self->{'methods'}{$methname};
+
+		#figure out how to deal with errors for this method
+		$self->{'_on_error'} = delete $args{'_error'} || delete $args{'_on_error'} || $meth->{'en_errors'}; # move the '_error' message from args to the object
 
 		#we need a DBI handle
-                #exists $self->{_dbh} or return $self->_error("DBI handle missing");
-		unless (exists $self->{_dbh} && ref $self->{_dbh} eq 'DBI::db') { return $self->_error("DBI handle missing"); }
-
-		#and a matching method
-                exists $self->{'methods'}{$1} or $self->_error("Method ".$1." not defined");
-
-		#check special method and dbd bindings
-		#unless (($self->{'methods'}{$1} eq 'mysql') && ($self->{_dbh}->{Driver}->{Name} eq 'mysql')) {
-                #	die "You cannot use exists $self->{'methods'}{$1} or $self->_error("Method ".$1." not defined");
-
-		#we create a new DBI statement handle - unless it's a no-prepare type
-		if  (exists $self->{'methods'}{$1}->{'noprepare'}) {
-			$self->{'_sth_'.$1} = TRUE; #faking it
-		} else {
-			print STDERR "$PACKAGE DEBUG: preparing ".$self->{'methods'}{$1}->{sql}."\n" if DEBUG;
-                	$self->{'_sth_'.$1} =  $self->{_dbh}->prepare($self->{'methods'}{$1}->{sql}) or return $self->_error($methname." prepare failed");
+		unless (exists $self->{_dbh} && ref $self->{_dbh} eq 'DBI::db') {
+			return $self->_error("DBI handle missing");
 		}
+		if (!$self->{_dbh}->{'Active'}) {	# the connection is broken
+            		delete $self->{'statements'};	# need to forget we ever prepared anything
+            		$self->_connect();
+        	}
 
-		# Use this DBI built-in some day
-		# $self->{'_sth_'.$1}->{'NUM_OF_FIELDS'}
-                return;
-	}
-	#is it a method
-	elsif (exists $self->{'methods'}{$methname}) {
+		#create the statement if it does not already exist
+		if (!exists $self->{'statements'}{$methname}) {
+			#prepare the new DBI statement handle - unless it's a no-prepare type
+			if (defined $meth->{'noprepare'}) {
+				$self->{'statements'}{$methname} = TRUE;    #faking it
+			} else {
+				$self->_prepare($methname) or return $self->_error($methname." prepare failed");
+			}
+		}
+		my $sth = $self->{'statements'}{$methname};
 		
-		#call the associated DBI statement handle (which is then automagically created)
-		my $sthname = "_sth_".$methname;
-		$self->$sthname();
-	
-		#and it the statement handle will appear on the self object
-		my $sth = $self->{"_sth_".$methname};
-
-		my ($argsref) = $self->{'methods'}{$methname}->{args};
 		#put the required bind values here
 		my @bind_values = ();
-		my $cnt = 1;
+		my $cnt = 0;
+
 		#run through the args defined for the method
-		foreach (@$argsref) {
-			unless (exists $args{$_}) { 
+		foreach (@{$meth->{'args'}}) {
+			$cnt++;
+			if (exists $args{$_}) {
+				push @bind_values, $args{$_};
+			} 
+			elsif (exists $self->{defaults} and exists $self->{defaults}{$_}) {
+				push @bind_values, $self->{defaults}{$_};
+			}
+			else { 
 				return $self->_error($methname." Insufficient parameters (".$_.")");
 			}
-			#the argument was provided, so we use it
-			push @bind_values, $args{$_};
+
 			#for checking argument count later
 			delete $args{$_};
 
@@ -211,31 +224,32 @@ sub AUTOLOAD {
 			next unless ($self->{_dbh}->{Driver}->{Name} eq 'mysql');
 
 			# If we haven't prepared the $sth, then don't call it
-			next unless (exists $self->{'methods'}{$methname}->{'noprepare'});
+			next unless (exists $meth->{'noprepare'});
 
 			if ($_ =~ /^limit_/) { $sth->bind_param($cnt,'',DBI::SQL_INTEGER); }
-			$cnt++;
 		}
 
 		#warn if more arguments than needed was provided
-		foreach (keys %args) {
-			warn "$PACKAGE WARN: useless argument \"".$_."\" provided for method \"".$methname."\"";
+		if ( $self->{'warn_useless'} or DEBUG ) {
+			foreach (keys %args) {
+				carp "$PACKAGE WARN: useless argument \"".$_."\" provided for method \"".$methname."\"";
+			}
 		}
 
 		#do it
 		my $rv;	
-		if  (exists $self->{'methods'}{$methname}->{'noprepare'}) {
+		if  (exists $meth->{'noprepare'}) {
 			# Execute the SQL directly - as we have no prepared $sth
-			my $sql = $self->{'methods'}{$methname}->{sql};
-			if (exists $self->{'methods'}{$methname}->{'noquote'}) {
+			my $sql = $meth->{sql};
+			if (exists $meth->{'noquote'}) {
 				# HACK: danger will robinson. danger.
-				my $sql = $self->{'methods'}{$methname}->{sql};
+				my $sql = $meth->{sql};
 				$sql =~ s/\?+?/(shift @bind_values)/oe while (@bind_values);
 				$rv = $self->{_dbh}->do($sql) or return $self->_error("_sth_".$methname." do failed : ".DBI::errstr);
 			} else {
 				# Let's quote the bind_values
 				#$sql =~ s/\?+?/($self->{_dbh}->quote_identifier(shift @bind_values))/oe while (@bind_values);
-				$rv = $self->{_dbh}->do($self->{'methods'}{$methname}->{sql},undef,@bind_values) or return $self->_error("_sth_".$methname." do failed : ".DBI::errstr);
+				$rv = $self->{_dbh}->do($meth->{sql},undef,@bind_values) or return $self->_error("_sth_".$methname." do failed : ".DBI::errstr);
 			}
 		} else {
 			# Execute the query normally on the statement handle
@@ -244,34 +258,40 @@ sub AUTOLOAD {
 		print STDERR "$PACKAGE DEBUG:  DBI: ".DBI::errstr."\n" if (!$rv && DEBUG);
 		unless ($rv) { $self->_error("DBI execute error: ".DBI::errstr); $sth->finish; return }
 
-		my ($ret) = $self->{'methods'}{$methname}->{ret};
+		my ($ret) = $meth->{ret};
 		print STDERR "Found ret for $methname: $ret\n" if DEBUG;
 
-		if ($self->{'methods'}{$methname}->{ret} == WANT_ARRAY) {
+		if ($meth->{ret} == WANT_ARRAY) {
 			my @ret;
 			while (my (@ref) = $sth->fetchrow_array) { push @ret,@ref }
 			return @ret;
-		} elsif ($self->{'methods'}{$methname}->{ret} == WANT_ARRAYREF) {
+		} elsif ($meth->{ret} == WANT_ARRAYREF) {
 			my $ret = $sth->fetchrow_arrayref;
 			if ((!defined $ret) || (ref $ret eq 'ARRAY')) {
 				return $ret;
 			} else {
 				return $self->_error("_sth_".$methname." is doing fetching on a non-SELECT statement");
 			}
-		} elsif ($self->{'methods'}{$methname}->{ret} == WANT_HASHREF) {
+		} elsif ($meth->{ret} == WANT_HASHREF) {
 			my $ret = $sth->fetchrow_hashref;
 			if ((!defined $ret) || (ref $ret eq 'HASH')) {
 				return $ret;
 			} else {
 				return $self->_error("_sth_".$methname." is doing fetching on a non-SELECT statement");
 			}
-		} elsif ($self->{'methods'}{$methname}->{ret} == WANT_ARRAY_HASHREF) {
+		} elsif ($meth->{ret} == WANT_ARRAY_ARRAYREF) {
+			my @ret;
+			while (my $ref = $sth->fetchrow_arrayref) {
+				push @ret, $ref;
+			}
+			return \@ret;
+		} elsif ($meth->{ret} == WANT_ARRAY_HASHREF) {
 			my @ret;
 			while (my $ref = $sth->fetchrow_hashref) {
 				push @ret, $ref;
 			}
 			return \@ret;
-		} elsif ($self->{'methods'}{$methname}->{ret} == WANT_AUTO_INCREMENT) {
+		} elsif ($meth->{ret} == WANT_AUTO_INCREMENT) {
 
 			my $cur_dbd = $self->{_dbh}->{Driver}->{Name};
 			unless ($cur_dbd) { return $self->_error("Unknown DBD '".$cur_dbd."'"); }
@@ -296,8 +316,10 @@ sub AUTOLOAD {
 			} else {
 				return $self->_error("_sth_".$methname." is using DBD specific AUTO_INCREMENT on unsupported DBD");
 			}
-		} elsif ($self->{'methods'}{$methname}->{ret} == WANT_RETURN_VALUE) {
+		} elsif ($meth->{ret} == WANT_RETURN_VALUE) {
 			return $rv;
+		} elsif ($meth->{ret} == WANT_HANDLE ) {
+			return $sth;
 		} else {
 			return $self->_error("No such return type for ".$methname);
 		}
@@ -361,11 +383,42 @@ sub _disconnect {
 	return TRUE;
 }
 
+sub _prepare {
+	my ($self,$methname) = @_;
+	my $meth = $self->{'methods'}{$methname};
+	print STDERR "$PACKAGE DEBUG: preparing ".$meth->{sql}."\n" if DEBUG;
+	$self->{'statements'}{$methname} = $self->{_dbh}->prepare($meth->{sql}) or return $self->_error( $meth . " prepare failed" );
+}
+
 sub _error {
         my ($self,$data) = (shift,shift);
+
+	my $on_error = $self->{'_on_error'} || $self->{'_on_errors'};    # method specific or global
+    
+        $data = $self->{'_format_errors'}->($data) if exists $self->{'_format_errors'};
+        return unless $data;
+
         $self->{'errorstate'} = TRUE;
         $self->{'errormessage'} = $data;
-        warn "$PACKAGE ERROR: ".$data;
+
+	if (ref($on_error eq 'CODE')) {
+		return $on_error->($data);
+	} elsif ($on_error eq 'die') {
+		die $data;
+	} elsif ($on_error eq 'croak') {
+		croak $data;
+	} elsif ($on_error =~ /\b_ERROR_\b/) {
+		$on_error =~ s/\b_ERROR_\b/$data/g;
+		if (ref($self->{'_on_errors'}) eq 'CODE') {
+			return $self->{'_on_errors'}->($on_error);
+		} elsif ($on_error =~ /\n$/) {
+			die $on_error;
+		} else {
+			carp $on_error;
+		}
+	} else {
+		carp "$PACKAGE ERROR: " . $data;
+	}
         return;
 }
 
@@ -380,7 +433,7 @@ __END__
 
 =head1 NAME
 
-DBIx::LazyMethod - Simple 'database query-to-accessor method' wrappers. Quick and dirty OO interface to your data.
+DBIx::LazyMethod - Simple 'database query-to-accessor method' wrappers. 
 
 =head1 SYNOPSIS
 
@@ -399,7 +452,7 @@ When used directly:
 		args => [ qw(id) ],
 		ret => WANT_HASHREF,
 	},
-	# Although not really recommended, you can also change table data
+	# Although not really recommended, you can also change the database schema
 	drop_table => {
 		sql => "DROP TABLE ?",
 		args => [ qw(table) ],
@@ -421,10 +474,10 @@ When used directly:
 
  Accessor methods are now available:
  
-  my $rv = $db->set_people_name_by_id(name=>'Arne Raket', id=>42);
+  $db->set_people_name_by_id(name=>'Arne Raket', id=>42);
   if ($db->is_error) { die $db->{errormessage}; }
 
-  my $rv2 = $db->drop_table(table=>'pony');
+  $db->drop_table(table=>'pony');
   if ($db->is_error) { die $db->{errormessage}; }
 
 When sub-classed:
@@ -494,22 +547,31 @@ The value of 'ret' (return value) can be:
 =over 4
 
 =item *
-	WANT_ARRAY returns in array context (SELECT)
+	WANT_ARRAY / '@' - returns an array (or array ref in scalar context) containing all the rows concatenated together.
+	This is especially handy for queries returning just one column. (SELECT)
 
 =item *
-	WANT_ARRAYREF returns a reference to an array - or undef (SELECT)
+	WANT_ARRAYREF / '\@' - returns a reference to an array containing the data of the first row.
+	Other rows are not returned! (SELECT)
 
 =item *
-	WANT_HASHREF returns a reference to a hash - or undef (SELECT)
+	WANT_HASHREF / '\%' - returns a reference to a hash containing the data of the first row.
+	Other rows are not returned! (SELECT)
 
 =item *
-	WANT_ARRAY_HASHREF returns an array of hashrefs (SELECT)
+	WANT_ARRAY_HASHREF / '@%' - returns an array of hashrefs (SELECT)
 
 =item *
-	WANT_RETURN_VALUE returns the DBI returnvalue (NON-SELECT)
+	WANT_ARRAY_ARRAYREF / '@@' - returns an array of arrayrefs (SELECT)
 
 =item *
-	WANT_AUTO_INCREMENT returns the new auto_increment value of an INSERT (MySQL/Pg specific).
+	WANT_RETURN_VALUE / '$' - returns the DBI return value (NON-SELECT)
+
+=item *
+	WANT_AUTO_INCREMENT / '$++' - returns the new auto_increment value of an INSERT (MySQL/Pg specific. SELECT @@IDENTITY variable for MS SQL).
+
+=item *
+	WANT_HANDLE / '<>' - returns the DBI statement handle. You may call the fetchxxx_xxx() methods you need then (SELECT)
 
 =back
 
@@ -525,6 +587,12 @@ See the 'bind_param' section of the 'Statement Handle Methods' in the DBI docume
 The existence of the 'noquote' key indicates that the arguments listed should not be quoted.
 This is for dealing with table names (Like 'DROP TABLE ?'). It's really a hack. 
 The 'noquote' key has no effect unless used in collaboration with the 'noprepare' key on a method.
+
+=head2 on_errors
+
+This parameter overrides the global C<on_errors> parameter with one exception. If you specify an error template
+and the global C<on_errors> is a subroutine reference then DBIx::LazyMethod first fills in the template and then calls that subroutine.
+See the ERROR HANDLING section for details.
 
 =cut
 
@@ -557,8 +625,7 @@ arguments which it recognizes are:
 
 =item C<data_source>
 
-The data source normally fed to DBI->connect. Normally in the format of 
-C<dbi:DriverName:database_name>.
+The data source normally fed to DBI->connect. Normally in the format of C<dbi:DriverName:database_name>.
 
 =item C<user>
 
@@ -576,6 +643,13 @@ The database connection attributes. Leave blank for DBI defaults.
 
 The methods hash reference. Also see the KEYS IN METHODS DEFINITION description.
 
+=item C<defaults> (optional)
+
+A hash reference to default values. This allows you to specify the default values for arguments to your methods.
+If you do not specify the value of an argument of a method it is looked up in the defaults hash and only if not found there do you get an error.
+You may access the defaults via C< $db-E<gt>{'defaults'} >. This is only usefull if you name your arguments consistently and you do have
+some values (say, a session id) that are passed to lots of methods.
+
 =item C<noprepare> (optional)
 
 If defined - causes the method to be executed directly, without involving a statement handle.
@@ -585,20 +659,97 @@ If defined - causes the method to be executed directly, without involving a stat
 When defined, the arguments will not be quoted/escaped before execution. This is normally only used for table names.
 C<noprepare> must also be defined for this option to work.
 
+=item C<format_errors> (optional)
+
+This subroutine gets called for each error and may be used to reformat it. It gets the error message as its first
+argument and is supposed to return the reformated message. If it returns undef or an empty string no error is reported
+and the method that caused the error returns undef. This is evaluated before the error details are added!
+
+=item C<on_errors> (optional)
+
+This may be either a reference to a procedure to be called to report the errors or one of the strings
+'carp', 'croak' or 'die' or an error message template.
+
+If you specify a code reference then DBIx::LazyMethod calls your subroutine passing the error message
+(after formatting and with the error details added) as the first argument and returns whatever that subroutine returns.
+
+If you specify 'carp', 'croak' or 'die' them DBIx::LazyMethod calls the respective function with the error message.
+
+If you specify some other string then DBIx::LazyMethod replaces the token _ERROR_ in the string by the actuall
+error message and then either die()s (if the error template ends with a newline) or carp()s.
+
 =back
 
 =cut
 
-=item C<is_error()>
+=item C<is_error()> (deprecated)
 
-The C<is_error()> simply returns true if the internal error state flag has been set.
-The errormessage is then available from C< $db-E<gt>{errormessage}; >.
+Whenever an error occures (and is not forced to be ignored by the format_errors subroutine) the module sets an internal flag in the object
+that may be queried by method is_error() and stores the error message in C< $db-E<gt>{errormessage}; >.
 
 =back
 
+=head1 ERROR HANDLING
+
+By default all methods carp() in case there is an error. You can specify that they should die() or croak() instead or that a function you specify should be called.
+You may also provide a formatting subroutine that will be called on the error messages before the carp(), croak(), die() or the callback function.
+Apart from this you may ask DBIx::LazyMethod to include the call details in the error message. If you do so then the error message will
+(if possible) contain a snippet of SQL that is being executed, including the values. This is usualy NOT exactly the thing being executed
+against the database though, DBIx::LazyMethod prepares the statements and uses placeholders.
+
+You may then change the way errors are reported when defining the methods or when calling them.
+
+=head2 Constructor parameters
+
+=over 4
+
+=item C<format_errors>
+
+This subroutine gets called for each error and may be used to reformat it. It gets the error message as its first
+argument and is supposed to return the reformated message. If it returns undef or an empty string no error is reported
+and the method that caused the error returns undef. This is evaluated before the error details are added!
+
+=item C<error_details>
+
+This is a boolean parameter. If set to a true value, DBIx::LazyMethod includes the executed SQL in the error message.
+
+=item C<on_errors>
+
+This may be either a reference to a procedure to be called to report the errors or one of the strings
+'carp', 'croak' or 'die' or an error message template.
+
+If you specify a code reference then DBIx::LazyMethod calls your subroutine passing the error message
+(after formatting and with the error details added) as the first argument and returns whatever that subroutine returns.
+
+If you specify 'carp', 'croak' or 'die' them DBIx::LazyMethod calls the respective function with the error message.
+
+If you specify some other string then DBIx::LazyMethod replaces the token _ERROR_ in the string by the actuall
+error message and then either die()s (if the error template ends with a newline) or carp()s.
+
+=back
+
+
+=head2 Method definition parameters
+
+
+=head2 Method call parameters
+
+=over 4
+
+=item C<_error/_on_error>
+
+This parameter overrides the C<on_errors> parameter specified either globaly or in the method definition.
+Like above, if you specify an error template and the global C<on_errors> is a code reference then DBIx::LazyMethod first fills in the template
+and then calls that subroutine.
+
+=back
+
+Whenever an error occures (and is not forced to be ignored by the format_errors subroutine) the module sets an internal flag in the object
+that may be queried by method is_error() and stores the error message in C< $db-E<gt>{errormessage}; >.
+
 =head1 COPYRIGHT
 
-Copyright (c) 2002-04 Casper Warming <cwg@usr.bin.dk>.  All rights
+Copyright (c) 2002-09 Casper Warming <warming@cpan.org>.  All rights
 reserved.
 
 This program is free software; you can redistribute it and/or
@@ -609,15 +760,15 @@ but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 Artistic License for more details.
 
-=head1 AUTHOR
+=head1 AUTHORS
 
-Casper Warming <cwg@usr.bin.dk>
+Casper Warming <warming@cpan.org>
+
+Jenda Krynicky <Jenda@Krynicky.cz>
 
 =head1 TODO
 
 =over 
-
-=item More DBD specific functions (Oracle/Pg).
 
 =item Better documentation.
 
@@ -633,9 +784,11 @@ Casper Warming <cwg@usr.bin.dk>
 
 =item Copenhagen Perl Mongers for the motivation. 
 
-=item Sorry to Thomas Eibner for not naming the module Doven::Hest.
+=item Apologies to Thomas Eibner for not naming the module Doven::Hest.
 
 =item JONASBN for reporting errors and helping with Pg issues.
+
+=item JENDA for continued development and feature suggestions.
 
 =back
 
